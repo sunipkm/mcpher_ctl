@@ -1,0 +1,9 @@
+**/*.obj
+**/*.pdb
+**/.vscode
+**/imgui.ini
+**/build
+**/output
+**/imgui/win32_lib
+**/*.res
+**/RC*
