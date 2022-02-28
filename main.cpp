@@ -27,6 +27,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 typedef struct
 {
+    int index;
     long serNum;
     float minVel;
     float set_minVel;
@@ -43,6 +44,13 @@ typedef struct
     float ofst;
     BOOL moving;
     bool warn;
+    float start; // scan start
+    float stop; // scan stop
+    float step; // scan step
+    float scanDelay; // in seconds
+    bool scanning;
+    bool scanfcninuse; // scan function done
+    bool scanmsg;
 } motorProps;
 
 bool init = true;
@@ -52,6 +60,93 @@ long numUnits = 0;
 
 motorProps *motors = nullptr;
 std::string *warnText = nullptr;
+std::string *scanText = nullptr;
+HANDLE *scanFcnHdl = nullptr;
+DWORD *scanFcnId = nullptr;
+
+
+DWORD WINAPI MotorScanFcn(LPVOID _in)
+{
+    motorProps *props = (motorProps *) _in; // get motor props
+    int idx = props->index;
+    props->scanfcninuse = true; // scan function in use
+    // check start - stop - step
+    float step = props->step;
+    float start = props->start;
+    float stop = props->stop;
+    float sleepTime = props->scanDelay;
+    if (sleepTime < 0)
+        sleepTime = 0.1;
+    if (sleepTime > 10)
+        sleepTime = 10;
+        props->scanDelay = sleepTime;
+    float pos = start;
+    bool scanning = true;
+    // sanitize step size
+    step = props->step;
+    step = step < 0 ? -step : step;
+    step = step == 0 ? 0.1 : step;
+    props->step = step;
+    bool mov_dir = start < stop;
+    if (start < 0)
+    {
+        scanText[idx] = "Start position is negative, invalid.";
+        props->scanmsg = true;
+        goto end; 
+    }
+    if (stop < 0)
+    {
+        scanText[idx] = "Start position is negative, invalid.";
+        props->scanmsg = true;
+        goto end;
+    }
+    if (start == stop)
+    {
+        scanText[idx] = "Scan start and stop locations are same, invalid.";
+        props->scanmsg = true;
+        goto end;
+    }
+    scanText[idx] = "Moving to starting position...";
+    if (MOT_MoveAbsoluteEx(props->serNum, start, true))
+    {
+        scanText[idx] = "Could not move to starting position for scan.";
+        props->scanmsg = true;
+    }
+    if (!mov_dir)
+        step = -step;
+    scanText[idx] = "Starting scan...";
+    props->scanning = true;
+    while (props->scanning & scanning)
+    {
+        // make measurement
+        scanText[idx] = "Making measurement...";
+        Sleep(sleepTime * 1000);
+        pos += step;
+        if (mov_dir)
+        {
+            scanning = pos < stop;
+        }
+        else
+        {
+            scanning = pos > stop;
+        }
+        if (props->scanning != true)
+            continue;
+        scanText[idx] = "Moving to " + std::to_string(pos) + "...";
+        if (MOT_MoveAbsoluteEx(props->serNum, pos, false))
+        {
+            scanText[idx] = "Could not move to position " + std::to_string(pos) + ", invalid.";
+            props->scanmsg = true;
+            break;
+        }
+    }
+    scanText[idx] = "Finished scan.";
+    props->scanmsg = true;
+end:
+    props->scanning = false;
+    props->scanfcninuse = false;
+    return NULL;
+}
 
 DWORD WINAPI InitThreadFcn(LPVOID _in)
 {
@@ -83,6 +178,9 @@ DWORD WINAPI InitThreadFcn(LPVOID _in)
         }
         motors = new motorProps[numUnits];
         warnText = new std::string[numUnits];
+        scanText = new std::string[numUnits];
+        scanFcnHdl = new HANDLE[numUnits];
+        scanFcnId = new DWORD[numUnits];
         if (motors == nullptr)
         {
             init = false;
@@ -91,6 +189,7 @@ DWORD WINAPI InitThreadFcn(LPVOID _in)
             continue;
         }
         memset(motors, 0x0, sizeof(motorProps) * numUnits);
+        memset(scanFcnHdl, 0x0, sizeof(HANDLE) * numUnits);
         for (long i = 0; i < numUnits; i++)
         {
             ret = GetHWSerialNumEx(HWTYPE_KST101, i, &motors[i].serNum);
@@ -102,6 +201,7 @@ DWORD WINAPI InitThreadFcn(LPVOID _in)
                 continue;
             }
             ret = InitHWDevice(motors[i].serNum);
+            motors[i].index = i;
             if (ret)
             {
                 init = false;
@@ -407,6 +507,56 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                         warnText[i] = "Could not go home: " + std::to_string(ret);
                     }
                 }
+                ImGui::Separator();
+                // scan window
+                ImGui::Text("Scan");
+                ImGui::Columns(4);
+                ImGui::InputFloat((std::string("Start##") + std::to_string(i)).c_str(), &motors[i].start, 0, 0, "%.3f", motors[i].scanfcninuse ? ImGuiInputTextFlags_ReadOnly : ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AllowTabInput | ImGuiInputTextFlags_AutoSelectAll);
+                ImGui::NextColumn();
+                ImGui::InputFloat((std::string("Stop##") + std::to_string(i)).c_str(), &motors[i].stop, 0, 0, "%.3f", motors[i].scanfcninuse ? ImGuiInputTextFlags_ReadOnly : ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AllowTabInput | ImGuiInputTextFlags_AutoSelectAll);
+                ImGui::NextColumn();
+                ImGui::InputFloat((std::string("Step##") + std::to_string(i)).c_str(), &motors[i].step, 0, 0, "%.3f", motors[i].scanfcninuse ? ImGuiInputTextFlags_ReadOnly : ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AllowTabInput | ImGuiInputTextFlags_AutoSelectAll);
+                ImGui::NextColumn();
+                ImGui::InputFloat((std::string("Delay##") + std::to_string(i)).c_str(), &motors[i].scanDelay, 0, 0, "%.3f", motors[i].scanfcninuse ? ImGuiInputTextFlags_ReadOnly : ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AllowTabInput | ImGuiInputTextFlags_AutoSelectAll);
+                ImGui::NextColumn();
+                ImGui::NextColumn();
+                ImGui::NextColumn();
+                if (!motors[i].scanfcninuse) // start scanning
+                {
+                    if (ImGui::Button((std::string("Start Scan##") + std::to_string(i)).c_str()))
+                    {
+                        scanFcnHdl[i] = CreateThread(NULL, 0, MotorScanFcn, &motors[i], 0, &scanFcnId[i]);
+                        if (scanFcnHdl[i] == NULL) // failure
+                        {
+                            scanText[i] = "Could not start scanning thread.";
+                            motors[i].scanmsg = true;
+                        }
+                    }
+                }
+                else
+                {
+                    if (ImGui::Button((std::string("Stop Scan##") + std::to_string(i)).c_str()))
+                    {
+                        motors[i].scanning = false;
+                    }
+                }
+                ImGui::Text("Scan: %s", scanText[i].c_str());
+                if (motors[i].scanmsg)
+                    ImGui::PushStyleColor(0, IM_COL32(30, 30, 30, 255));
+                else
+                    ImGui::PushStyleColor(0, IM_COL32(0, 166, 44, 255));
+                if (ImGui::Button((std::string("OKAY##ScanAckBtn") + std::to_string(i)).c_str()))
+                {
+                    motors[i].scanmsg = false;
+                    scanText[i] = "";
+                }
+                ImGui::PopStyleColor();
+                if (scanFcnHdl[i] != NULL && motors[i].scanfcninuse == false) // was in use
+                {
+                    TerminateThread(scanFcnHdl[i], NULL);
+                    scanFcnHdl[i] = NULL;
+                }
+                ImGui::Separator();
                 if (motors[i].warn)
                 {
 
